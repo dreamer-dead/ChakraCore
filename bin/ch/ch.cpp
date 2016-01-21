@@ -5,6 +5,48 @@
 #include "stdafx.h"
 #include "core/AtomLockGuids.h"
 
+namespace
+{
+
+template <typename HandleType, typename DeleterType, DeleterType deleter, HandleType InvalidValue = 0>
+struct ScopedGuard
+{
+    ScopedGuard() = delete;
+    ScopedGuard(const ScopedGuard&) = delete;
+    void operator=(const ScopedGuard&) = delete;
+
+    ScopedGuard(HandleType handle) : m_handle(handle)
+    {
+    }
+
+    ~ScopedGuard()
+    {
+        if (m_handle != InvalidValue)
+        {
+            deleter(m_handle);
+        }
+    }
+
+    explicit operator bool() const
+    {
+        return m_handle != InvalidValue;
+    }
+
+    HandleType Get() const
+    {
+        return m_handle;
+    }
+
+private:
+    HandleType const m_handle;
+};
+
+using ScopedAtom = const ScopedGuard<ATOM, decltype(&::DeleteAtom), &::DeleteAtom>;
+using ScopedChakraDll = const ScopedGuard<HINSTANCE, decltype(&ChakraRTInterface::UnloadChakraDll), &ChakraRTInterface::UnloadChakraDll, nullptr>;
+using ScopedHandle = const ScopedGuard<HANDLE, decltype(&::CloseHandle), &::CloseHandle>;
+
+}  // namespace
+
 unsigned int MessageBase::s_messageCount = 0;
 
 LPCWSTR hostName = L"ch.exe";
@@ -500,37 +542,33 @@ int _cdecl wmain(int argc, __in_ecount(argc) LPWSTR argv[])
 
     HostConfigFlags::pfnPrintUsage = PrintUsageFormat;
 
-    ATOM lock = ::AddAtom(szChakraCoreLock);
-    AssertMsg(lock, "failed to lock chakracore.dll");
+    ScopedAtom atomGuard(::AddAtom(szChakraCoreLock));
+    AssertMsg(atomGuard, "failed to lock chakracore.dll");
 
     HostConfigFlags::HandleArgsFlag(argc, argv);
 
     CComBSTR fileName;
 
     ChakraRTInterface::ArgInfo argInfo = { argc, argv, PrintUsage, &fileName.m_str };
-    HINSTANCE chakraLibrary = ChakraRTInterface::LoadChakraDll(argInfo);
+    ScopedChakraDll chakraLibrary = ChakraRTInterface::LoadChakraDll(argInfo);
+    if (!chakraLibrary)
+        return 0;
 
-    if (fileName.m_str == nullptr) {
+    if (fileName.m_str == nullptr)
+    {
         fileName = CComBSTR(argv[1]);
     }
 
-    if (chakraLibrary != nullptr)
+    ScopedHandle threadHandle = reinterpret_cast<HANDLE>(_beginthreadex(0, 0, &StaticThreadProc, &argInfo, STACK_SIZE_PARAM_IS_A_RESERVATION, 0));
+    if (!threadHandle)
     {
-        HANDLE threadHandle;
-        threadHandle = reinterpret_cast<HANDLE>(_beginthreadex(0, 0, &StaticThreadProc, &argInfo, STACK_SIZE_PARAM_IS_A_RESERVATION, 0));
-        if (threadHandle != nullptr)
-        {
-            DWORD waitResult = WaitForSingleObject(threadHandle, INFINITE);
-            Assert(waitResult == WAIT_OBJECT_0);
-            CloseHandle(threadHandle);
-        }
-        else
-        {
-            fwprintf(stderr, L"FATAL ERROR: failed to create worker thread error code %d, exiting\n", errno);
-            AssertMsg(false, "failed to create worker thread");
-        }
-        ChakraRTInterface::UnloadChakraDll(chakraLibrary);
+        fwprintf(stderr, L"FATAL ERROR: failed to create worker thread error code %d, exiting\n", errno);
+        AssertMsg(false, "failed to create worker thread");
+        return 0;
     }
+
+    const DWORD waitResult = WaitForSingleObject(threadHandle.Get(), INFINITE);
+    Assert(waitResult == WAIT_OBJECT_0);
 
     return 0;
 }
