@@ -21,8 +21,8 @@ struct ScopedGuard
 
     ~ScopedGuard()
     {
-      if (m_handle != InvalidValue)
-        deleter(m_handle);
+        if (m_handle != InvalidValue)
+            deleter(m_handle);
     }
 
     explicit operator bool() const { return m_handle != InvalidValue; }
@@ -33,9 +33,43 @@ private:
     HandleType const m_handle = InvalidValue;
 };
 
+template <typename CallType, CallType callee>
+struct ScopedCall
+{
+    ScopedCall(const ScopedCall&) = delete;
+    void operator=(const ScopedCall&) = delete;
+
+    ScopedCall() {}
+
+    ~ScopedCall()
+    {
+        callee();
+    }
+};
+
+void JsSetCurrentContextToNull()
+{
+    ChakraRTInterface::JsSetCurrentContext(nullptr);
+}
+
 using ScopedAtom = const ScopedGuard<ATOM, decltype(&::DeleteAtom), &::DeleteAtom>;
 using ScopedChakraDll = const ScopedGuard<HINSTANCE, decltype(&ChakraRTInterface::UnloadChakraDll), &ChakraRTInterface::UnloadChakraDll, nullptr>;
 using ScopedHandle = const ScopedGuard<HANDLE, decltype(&::CloseHandle), &::CloseHandle>;
+
+using ScopedRuntime = const ScopedGuard<
+    JsRuntimeHandle,
+    decltype(&ChakraRTInterface::JsDisposeRuntime),
+    &ChakraRTInterface::JsDisposeRuntime,
+    JS_INVALID_RUNTIME_HANDLE>;
+
+using ScopedRestoreContext = const ScopedGuard<
+    JsContextRef,
+    decltype(&ChakraRTInterface::JsDisposeRuntime),
+    &ChakraRTInterface::JsSetCurrentContext,
+    JS_INVALID_REFERENCE>;
+
+using ScopedClearContext = const ScopedCall<decltype(&JsSetCurrentContextToNull), &JsSetCurrentContextToNull>;
+using ScopedFlushAll = const ScopedCall<decltype(&_flushall), &_flushall>;
 
 }  // namespace
 
@@ -129,6 +163,7 @@ LPCWSTR JsErrorCodeToString(JsErrorCode jsErrorCode)
 }
 
 #define IfJsErrorFailLog(expr) do { JsErrorCode jsErrorCode = expr; if ((jsErrorCode) != JsNoError) { fwprintf(stderr, L"ERROR: " TEXT(#expr) L" failed. JsErrorCode=0x%x (%s)\n", jsErrorCode, JsErrorCodeToString(jsErrorCode)); fflush(stderr); goto Error; } } while (0)
+#define IfJsErrorLogReturn(expr) do { JsErrorCode jsErrorCode = expr; if ((jsErrorCode) != JsNoError) { fwprintf(stderr, L"ERROR: " TEXT(#expr) L" failed. JsErrorCode=0x%x (%s)\n", jsErrorCode, JsErrorCodeToString(jsErrorCode)); fflush(stderr); return hr; } } while (0)
 
 int HostExceptionFilter(int exceptionCode, _EXCEPTION_POINTERS *ep)
 {
@@ -396,28 +431,31 @@ HRESULT ExecuteTest(LPCWSTR fileName)
     UINT lengthBytes = 0;
     hr = Helpers::LoadScriptFromFile(fileName, fileContents, &isUtf8, &contentsRaw, &lengthBytes);
     contentsRaw; lengthBytes; // Unused for now.
+    ScopedFlushAll flushGuard;
 
-    IfFailGo(hr);
+    IfFailedReturn(hr);
     if (HostConfigFlags::flags.GenerateLibraryByteCodeHeaderIsEnabled)
     {
         jsrtAttributes = (JsRuntimeAttributes)(jsrtAttributes | JsRuntimeAttributeSerializeLibraryByteCode);
     }
-    IfJsErrorFailLog(ChakraRTInterface::JsCreateRuntime(jsrtAttributes, nullptr, &runtime));
+    IfJsErrorLogReturn(ChakraRTInterface::JsCreateRuntime(jsrtAttributes, nullptr, &runtime));
+    ScopedRuntime runtimeGuard(runtime);
 
     JsContextRef context = JS_INVALID_REFERENCE;
-    IfJsErrorFailLog(ChakraRTInterface::JsCreateContext(runtime, &context));
-    IfJsErrorFailLog(ChakraRTInterface::JsSetCurrentContext(context));
+    IfJsErrorLogReturn(ChakraRTInterface::JsCreateContext(runtime, &context));
+    IfJsErrorLogReturn(ChakraRTInterface::JsSetCurrentContext(context));
+    ScopedClearContext contextGuard;
 
     if (!WScriptJsrt::Initialize())
     {
-        IfFailGo(E_FAIL);
+        return E_FAIL;
     }
 
     wchar_t fullPath[_MAX_PATH];
 
     if (_wfullpath(fullPath, fileName, _MAX_PATH) == nullptr)
     {
-        IfFailGo(E_FAIL);
+        return E_FAIL;
     }
 
     // canonicalize that path name to lower case for the profile storage
@@ -437,18 +475,18 @@ HRESULT ExecuteTest(LPCWSTR fileName)
                 WCHAR ext[_MAX_EXT];
                 _wsplitpath_s(fullPath, NULL, 0, NULL, 0, libraryName, _countof(libraryName), ext, _countof(ext));
 
-                IfFailGo(CreateLibraryByteCodeHeader(fileContents, (BYTE*)contentsRaw, lengthBytes, HostConfigFlags::flags.GenerateLibraryByteCodeHeader, libraryName));
+                IfFailedReturn(CreateLibraryByteCodeHeader(fileContents, (BYTE*)contentsRaw, lengthBytes, HostConfigFlags::flags.GenerateLibraryByteCodeHeader, libraryName));
             }
             else
             {
                 fwprintf(stderr, L"FATAL ERROR: -GenerateLibraryByteCodeHeader must provide the file name, i.e., -GenerateLibraryByteCodeHeader:<bytecode file name>, exiting\n");
-                IfFailGo(E_FAIL);
+                IfFailedReturn(E_FAIL);
             }
         }
         else
         {
             fwprintf(stderr, L"FATAL ERROR: GenerateLibraryByteCodeHeader flag can only be used on UTF8 file, exiting\n");
-            IfFailGo(E_FAIL);
+            return E_FAIL;
         }
     }
     else if (HostConfigFlags::flags.SerializedIsEnabled)
@@ -460,23 +498,13 @@ HRESULT ExecuteTest(LPCWSTR fileName)
         else
         {
             fwprintf(stderr, L"FATAL ERROR: Serialized flag can only be used on UTF8 file, exiting\n");
-            IfFailGo(E_FAIL);
+            return E_FAIL;
         }
     }
     else
     {
-        IfFailGo(RunScript(fileName, fileContents, nullptr, fullPath));
+        IfFailedReturn(RunScript(fileName, fileContents, nullptr, fullPath));
     }
-
-Error:
-    ChakraRTInterface::JsSetCurrentContext(nullptr);
-
-    if (runtime != JS_INVALID_RUNTIME_HANDLE)
-    {
-        ChakraRTInterface::JsDisposeRuntime(runtime);
-    }
-
-    _flushall();
 
     return hr;
 }
@@ -515,7 +543,6 @@ HRESULT ExecuteTestWithMemoryCheck(BSTR fileName)
 #endif
     return hr;
 }
-
 
 unsigned int WINAPI StaticThreadProc(void *lpParam)
 {
