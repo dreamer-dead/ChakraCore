@@ -55,9 +55,24 @@ void JsSetCurrentContextToNull()
     ChakraRTInterface::JsSetCurrentContext(nullptr);
 }
 
+template <typename Handle>
+bool WriteFile(const Handle& handle, LPCVOID buffer, DWORD length)
+{
+    // Ingnore this out value for now.
+    DWORD written;
+    return !!::WriteFile(handle.Get(), buffer, length, &written, nullptr);
+}
+
+template <typename Handle>
+bool WriteFile(const Handle& handle, const char* outputStr)
+{
+    return WriteFile(handle, outputStr, (DWORD)strlen(outputStr));
+}
+
 using ScopedAtom = const ScopedGuard<ATOM, decltype(&::DeleteAtom), &::DeleteAtom>;
 using ScopedChakraDll = const ScopedGuard<HINSTANCE, decltype(&ChakraRTInterface::UnloadChakraDll), &ChakraRTInterface::UnloadChakraDll, nullptr>;
 using ScopedHandle = const ScopedGuard<HANDLE, decltype(&::CloseHandle), &::CloseHandle>;
+using ScopedFileHandle = const ScopedGuard<HANDLE, decltype(&::CloseHandle), &::CloseHandle, INVALID_HANDLE_VALUE>;
 
 using ScopedRuntime = const ScopedGuard<
     JsRuntimeHandle,
@@ -245,18 +260,16 @@ Error:
 HRESULT CreateLibraryByteCodeHeader(LPCOLESTR fileContents, BYTE * contentsRaw, DWORD lengthBytes, LPCWSTR bcFullPath, LPCWSTR libraryNameWide)
 {
     HRESULT hr = S_OK;
-    HANDLE bcFileHandle = nullptr;
     BYTE *bcBuffer = nullptr;
     DWORD bcBufferSize = 0;
-    IfFailGo(GetSerializedBuffer(fileContents, &bcBuffer, &bcBufferSize));
+    IfFailedReturn(GetSerializedBuffer(fileContents, &bcBuffer, &bcBufferSize));
+    const std::unique_ptr<BYTE []> bufferGuard(bcBuffer);
 
-    bcFileHandle = CreateFile(bcFullPath, GENERIC_WRITE, FILE_SHARE_DELETE, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (bcFileHandle == INVALID_HANDLE_VALUE)
+    ScopedFileHandle bcFileHandle = CreateFile(bcFullPath, GENERIC_WRITE, FILE_SHARE_DELETE, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (!bcFileHandle)
     {
-        IfFailGo(E_FAIL);
+        return E_FAIL;
     }
-
-    DWORD written;
 
     // For validating the header file against the library file
     auto outputStr =
@@ -265,8 +278,8 @@ HRESULT CreateLibraryByteCodeHeader(LPCOLESTR fileContents, BYTE * contentsRaw, 
         "// Licensed under the MIT license. See LICENSE.txt file in the project root for full license information.\r\n"
         "//-------------------------------------------------------------------------------------------------------\r\n"
         "#if 0\r\n";
-    IfFalseGo(WriteFile(bcFileHandle, outputStr, (DWORD)strlen(outputStr), &written, nullptr));
-    IfFalseGo(WriteFile(bcFileHandle, contentsRaw, lengthBytes, &written, nullptr));
+    IfFalseReturn(WriteFile(bcFileHandle, outputStr));
+    IfFalseReturn(WriteFile(bcFileHandle, contentsRaw, lengthBytes));
     if (lengthBytes < 2 || contentsRaw[lengthBytes - 2] != '\r' || contentsRaw[lengthBytes - 1] != '\n')
     {
         outputStr = "\r\n#endif\r\n";
@@ -275,17 +288,15 @@ HRESULT CreateLibraryByteCodeHeader(LPCOLESTR fileContents, BYTE * contentsRaw, 
     {
         outputStr = "#endif\r\n";
     }
-    IfFalseGo(WriteFile(bcFileHandle, outputStr, (DWORD)strlen(outputStr), &written, nullptr));
+    IfFalseReturn(WriteFile(bcFileHandle, outputStr));
 
     // Write out the bytecode
-    outputStr = "namespace Js\r\n{\r\n    const char Library_Bytecode_";
-    IfFalseGo(WriteFile(bcFileHandle, outputStr, (DWORD)strlen(outputStr), &written, nullptr));
+    IfFalseReturn(WriteFile(bcFileHandle, "namespace Js\r\n{\r\n    const char Library_Bytecode_"));
     size_t convertedChars;
     char libraryNameNarrow[MAX_PATH + 1];
-    IfFalseGo((wcstombs_s(&convertedChars, libraryNameNarrow, libraryNameWide, _TRUNCATE) == 0));
-    IfFalseGo(WriteFile(bcFileHandle, libraryNameNarrow, (DWORD)strlen(libraryNameNarrow), &written, nullptr));
-    outputStr = "[] = {\r\n/* 00000000 */";
-    IfFalseGo(WriteFile(bcFileHandle, outputStr, (DWORD)strlen(outputStr), &written, nullptr));
+    IfFalseReturn((wcstombs_s(&convertedChars, libraryNameNarrow, libraryNameWide, _TRUNCATE) == 0));
+    IfFalseReturn(WriteFile(bcFileHandle, libraryNameNarrow));
+    IfFalseReturn(WriteFile(bcFileHandle, "[] = {\r\n/* 00000000 */"));
 
     for (unsigned int i = 0; i < bcBufferSize; i++)
     {
@@ -293,14 +304,12 @@ HRESULT CreateLibraryByteCodeHeader(LPCOLESTR fileContents, BYTE * contentsRaw, 
         auto scratchLen = sizeof(scratch);
         int num = _snprintf_s(scratch, scratchLen, " 0x%02X", bcBuffer[i]);
         Assert(num == 5);
-        IfFalseGo(WriteFile(bcFileHandle, scratch, (DWORD)(scratchLen - 1), &written, nullptr));
+        IfFalseReturn(WriteFile(bcFileHandle, scratch, (DWORD)(scratchLen - 1)));
 
         // Add a comma and a space if this is not the last item
         if (i < bcBufferSize - 1)
         {
-            char commaSpace[2];
-            _snprintf_s(commaSpace, sizeof(commaSpace), ",");  // close quote, new line, offset and open quote
-            IfFalseGo(WriteFile(bcFileHandle, commaSpace, (DWORD)strlen(commaSpace), &written, nullptr));
+            IfFalseReturn(WriteFile(bcFileHandle, ",", 1));
         }
 
         // Add a line break every 16 scratches, primarily so the compiler doesn't complain about the string being too long.
@@ -309,24 +318,11 @@ HRESULT CreateLibraryByteCodeHeader(LPCOLESTR fileContents, BYTE * contentsRaw, 
         {
             char offset[17];
             _snprintf_s(offset, sizeof(offset), "\r\n/* %08X */", i + 1);  // close quote, new line, offset and open quote
-            IfFalseGo(WriteFile(bcFileHandle, offset, (DWORD)strlen(offset), &written, nullptr));
+            IfFalseReturn(WriteFile(bcFileHandle, offset));
         }
     }
-    outputStr = "};\r\n\r\n";
-    IfFalseGo(WriteFile(bcFileHandle, outputStr, (DWORD)strlen(outputStr), &written, nullptr));
-
-    outputStr = "}\r\n";
-    IfFalseGo(WriteFile(bcFileHandle, outputStr, (DWORD)strlen(outputStr), &written, nullptr));
-
-Error:
-    if (bcFileHandle != nullptr)
-    {
-        CloseHandle(bcFileHandle);
-    }
-    if (bcBuffer != nullptr)
-    {
-        delete[] bcBuffer;
-    }
+    IfFalseReturn(WriteFile(bcFileHandle, "};\r\n\r\n"));
+    IfFalseReturn(WriteFile(bcFileHandle, "}\r\n"));
 
     return hr;
 }
@@ -344,10 +340,10 @@ static void CALLBACK PromiseContinuationCallback(JsValueRef task, void *callback
 HRESULT RunScript(LPCWSTR fileName, LPCWSTR fileContents, BYTE *bcBuffer, wchar_t *fullPath)
 {
     HRESULT hr = S_OK;
-    MessageQueue * messageQueue = new MessageQueue();
-    WScriptJsrt::AddMessageQueue(messageQueue);
+    const std::unique_ptr<MessageQueue> messageQueue(new MessageQueue());
+    WScriptJsrt::AddMessageQueue(messageQueue.get());
 
-    IfJsErrorFailLog(ChakraRTInterface::JsSetPromiseContinuationCallback(PromiseContinuationCallback, (void*)messageQueue));
+    IfJsErrorFailLog(ChakraRTInterface::JsSetPromiseContinuationCallback(PromiseContinuationCallback, (void*)messageQueue.get()));
 
     Assert(fileContents != nullptr || bcBuffer != nullptr);
     JsErrorCode runScript;
@@ -374,10 +370,6 @@ HRESULT RunScript(LPCWSTR fileName, LPCWSTR fileContents, BYTE *bcBuffer, wchar_
         } while (!messageQueue->IsEmpty());
     }
 Error:
-    if (messageQueue != nullptr)
-    {
-        delete messageQueue;
-    }
     return hr;
 }
 

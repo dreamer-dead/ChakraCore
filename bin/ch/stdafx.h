@@ -20,6 +20,7 @@
 #define IfJsrtError(expr) do { if((expr) != JsNoError) { goto Error; } } while(0)
 #define IfJsrtErrorSetGo(expr) do { errorCode = (expr); if(errorCode != JsNoError) { hr = E_FAIL; goto Error; } } while(0)
 #define IfFalseGo(expr) do { if(!(expr)) { hr = E_FAIL; goto Error; } } while(0)
+#define IfFalseReturn(expr) do { if(!(expr)) { hr = E_FAIL; return hr; } } while(0)
 
 #define WIN32_LEAN_AND_MEAN 1
 
