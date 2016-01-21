@@ -3,6 +3,9 @@
 // Licensed under the MIT license. See LICENSE.txt file in the project root for full license information.
 //-------------------------------------------------------------------------------------------------------
 #include "stdafx.h"
+
+#include <memory>
+
 #include "core/AtomLockGuids.h"
 
 namespace
@@ -385,39 +388,27 @@ HRESULT CreateAndRunSerializedScript(LPCWSTR fileName, LPCWSTR fileContents, wch
     JsContextRef context = JS_INVALID_REFERENCE, current = JS_INVALID_REFERENCE;
     BYTE *bcBuffer = nullptr;
     DWORD bcBufferSize = 0;
-    IfFailGo(GetSerializedBuffer(fileContents, &bcBuffer, &bcBufferSize));
+    IfFailedReturn(GetSerializedBuffer(fileContents, &bcBuffer, &bcBufferSize));
+    const std::unique_ptr<BYTE []> bufferGuard(bcBuffer);
 
     // Bytecode buffer is created in one runtime and will be executed on different runtime.
 
-    IfJsErrorFailLog(ChakraRTInterface::JsCreateRuntime(jsrtAttributes, nullptr, &runtime));
+    IfJsErrorLogReturn(ChakraRTInterface::JsCreateRuntime(jsrtAttributes, nullptr, &runtime));
+    ScopedRuntime runtimeGuard(runtime);
 
-    IfJsErrorFailLog(ChakraRTInterface::JsCreateContext(runtime, &context));
-    IfJsErrorFailLog(ChakraRTInterface::JsGetCurrentContext(&current));
-    IfJsErrorFailLog(ChakraRTInterface::JsSetCurrentContext(context));
+    IfJsErrorLogReturn(ChakraRTInterface::JsCreateContext(runtime, &context));
+    IfJsErrorLogReturn(ChakraRTInterface::JsGetCurrentContext(&current));
+    IfJsErrorLogReturn(ChakraRTInterface::JsSetCurrentContext(context));
+    ScopedRestoreContext currentContextGuard(current);
 
     // Initialized the WScript object on the new context
     if (!WScriptJsrt::Initialize())
     {
-        IfFailGo(E_FAIL);
+        return E_FAIL;
     }
 
-    IfFailGo(RunScript(fileName, fileContents, bcBuffer, fullPath));
+    IfFailedReturn(RunScript(fileName, fileContents, bcBuffer, fullPath));
 
-Error:
-    if (bcBuffer != nullptr)
-    {
-        delete[] bcBuffer;
-    }
-
-    if (current != JS_INVALID_REFERENCE)
-    {
-        ChakraRTInterface::JsSetCurrentContext(current);
-    }
-
-    if (runtime != JS_INVALID_RUNTIME_HANDLE)
-    {
-        ChakraRTInterface::JsDisposeRuntime(runtime);
-    }
     return hr;
 }
 
@@ -467,39 +458,33 @@ HRESULT ExecuteTest(LPCWSTR fileName)
 
     if (HostConfigFlags::flags.GenerateLibraryByteCodeHeaderIsEnabled)
     {
-        if (isUtf8)
-        {
-            if (HostConfigFlags::flags.GenerateLibraryByteCodeHeader != nullptr && *HostConfigFlags::flags.GenerateLibraryByteCodeHeader != L'\0')
-            {
-                WCHAR libraryName[_MAX_PATH];
-                WCHAR ext[_MAX_EXT];
-                _wsplitpath_s(fullPath, NULL, 0, NULL, 0, libraryName, _countof(libraryName), ext, _countof(ext));
-
-                IfFailedReturn(CreateLibraryByteCodeHeader(fileContents, (BYTE*)contentsRaw, lengthBytes, HostConfigFlags::flags.GenerateLibraryByteCodeHeader, libraryName));
-            }
-            else
-            {
-                fwprintf(stderr, L"FATAL ERROR: -GenerateLibraryByteCodeHeader must provide the file name, i.e., -GenerateLibraryByteCodeHeader:<bytecode file name>, exiting\n");
-                IfFailedReturn(E_FAIL);
-            }
-        }
-        else
+        if (!isUtf8)
         {
             fwprintf(stderr, L"FATAL ERROR: GenerateLibraryByteCodeHeader flag can only be used on UTF8 file, exiting\n");
             return E_FAIL;
         }
+
+        if (HostConfigFlags::flags.GenerateLibraryByteCodeHeader == nullptr || *HostConfigFlags::flags.GenerateLibraryByteCodeHeader == L'\0')
+        {
+            fwprintf(stderr, L"FATAL ERROR: -GenerateLibraryByteCodeHeader must provide the file name, i.e., -GenerateLibraryByteCodeHeader:<bytecode file name>, exiting\n");
+            return E_FAIL;
+        }
+
+        WCHAR libraryName[_MAX_PATH];
+        WCHAR ext[_MAX_EXT];
+        _wsplitpath_s(fullPath, NULL, 0, NULL, 0, libraryName, _countof(libraryName), ext, _countof(ext));
+
+        IfFailedReturn(CreateLibraryByteCodeHeader(fileContents, (BYTE*)contentsRaw, lengthBytes, HostConfigFlags::flags.GenerateLibraryByteCodeHeader, libraryName));
     }
     else if (HostConfigFlags::flags.SerializedIsEnabled)
     {
-        if (isUtf8)
-        {
-            CreateAndRunSerializedScript(fileName, fileContents, fullPath);
-        }
-        else
+        if (!isUtf8)
         {
             fwprintf(stderr, L"FATAL ERROR: Serialized flag can only be used on UTF8 file, exiting\n");
             return E_FAIL;
         }
+
+        CreateAndRunSerializedScript(fileName, fileContents, fullPath);
     }
     else
     {
